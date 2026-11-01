@@ -28,7 +28,7 @@ export type Device = {
   slug: string;
   label: string;
   notes: string;
-  password_hash: string;
+  password: string;
   ntp_port: number | null;
   legacy_hostname: string | null;
   legacy_http: number;

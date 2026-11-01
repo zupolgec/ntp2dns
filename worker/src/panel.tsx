@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Child } from "hono/jsx";
 import { requireAccess } from "./access";
-import { newSecret, sha256 } from "./crypto";
+import { newSecret } from "./crypto";
 import { fqdn, getById, removeDevice, SLUG_RE } from "./devices";
 import type { Device, Env } from "./env";
 import type { Messages } from "./i18n";
@@ -44,7 +44,8 @@ label{display:block;font-weight:500;margin:12px 0 4px}label .muted{font-weight:4
 input[type=text],input[type=number],textarea{width:100%;max-width:420px;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg);font:inherit}
 .check{display:flex;gap:8px;align-items:center;font-weight:400}
 .error{border-color:#c4320a;color:#c4320a}
-.secret{font-size:16px;padding:8px 10px;border:1px dashed var(--warn);border-radius:7px;display:inline-block;user-select:all}
+.secret{user-select:all}[data-hidden] .secret,.mask{display:none}[data-hidden] .mask{display:inline}
+.link{border:0;background:none;color:var(--accent);font:inherit;cursor:pointer;padding:0;margin-left:10px}
 dl{display:grid;grid-template-columns:200px 1fr;gap:6px 16px;margin:0}dt{color:var(--muted)}dd{margin:0}
 `;
 
@@ -175,7 +176,7 @@ type FormValues = {
   slug: string;
   label: string;
   notes: string;
-  ntp_port: string;
+  ntp: boolean;
   legacy_hostname: string;
   legacy_http: boolean;
   alert_hours: string;
@@ -199,10 +200,8 @@ function DeviceForm(props: {
   values: FormValues;
   error?: string;
   isNew: boolean;
-  freePort: number | null;
 }) {
   const { t, values: v } = props;
-  const { min, max } = portRange(props.env);
   return (
     <form method="post" action={props.action} class="card">
       {props.error && <p class="error">{props.error}</p>}
@@ -220,10 +219,9 @@ function DeviceForm(props: {
       <textarea id="notes" name="notes" rows={3}>
         {v.notes}
       </textarea>
-      <label for="ntp_port">
-        {t.fieldNtpPort} <span class="muted">{t.fieldNtpPortHint(props.freePort)}</span>
+      <label class="check">
+        <input type="checkbox" name="ntp" checked={v.ntp} /> {t.fieldNtp} <span class="muted">{t.fieldNtpHint}</span>
       </label>
-      <input type="number" id="ntp_port" name="ntp_port" value={v.ntp_port} min={min} max={max} />
       <label for="legacy_hostname">
         {t.fieldLegacyHostname} <span class="muted">{t.fieldLegacyHostnameHint}</span>
       </label>
@@ -249,7 +247,7 @@ async function readForm(c: { req: { formData(): Promise<FormData> } }): Promise<
     slug: s("slug").toLowerCase(),
     label: s("label"),
     notes: s("notes"),
-    ntp_port: s("ntp_port"),
+    ntp: f.get("ntp") === "on",
     legacy_hostname: s("legacy_hostname").toLowerCase(),
     legacy_http: f.get("legacy_http") === "on",
     alert_hours: s("alert_hours") || "24",
@@ -263,15 +261,6 @@ async function validate(env: Env, t: Messages, host: string, v: FormValues, self
     if (await env.DB.prepare("select 1 from devices where slug = ?").bind(v.slug).first()) return t.errSlugTaken;
   }
   if (!v.label) return t.errLabel;
-  if (v.ntp_port) {
-    const p = Number(v.ntp_port);
-    const { min, max } = portRange(env);
-    if (!Number.isInteger(p) || p < min || p > max) return t.errPortRange(min, max);
-    const taken = await env.DB.prepare("select label from devices where ntp_port = ? and id is not ?")
-      .bind(p, selfId)
-      .first<{ label: string }>();
-    if (taken) return t.errPortTaken(p, taken.label);
-  }
   if (v.legacy_hostname) {
     if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(v.legacy_hostname)) return t.errLegacyInvalid;
     const taken = await env.DB.prepare("select label from devices where legacy_hostname = ? and id is not ?")
@@ -289,7 +278,7 @@ const empty: FormValues = {
   slug: "",
   label: "",
   notes: "",
-  ntp_port: "",
+  ntp: false,
   legacy_hostname: "",
   legacy_http: false,
   alert_hours: "24",
@@ -309,28 +298,24 @@ panel.get("/devices/new", async (c) => {
         action="/admin/devices"
         values={empty}
         isNew
-        freePort={await nextFreePort(c.env)}
       />
     </Layout>,
   );
 });
 
-function SetupHelp(props: { t: Messages; env: Env; d: Device; host: string; secret?: string }) {
+function SetupHelp(props: { t: Messages; env: Env; d: Device; host: string }) {
   const { t, d } = props;
-  const pass = props.secret ?? t.passwordPlaceholder;
+  const pass = (
+    <>
+      <span class="secret" data-secret={d.password}>
+        {d.password}
+      </span>
+      <span class="mask">••••••••</span>
+    </>
+  );
   return (
-    <div class="card">
+    <div class="card" data-hidden>
       <h2 style="margin-top:0">{t.setupTitle}</h2>
-      {props.secret && (
-        <p>
-          {t.password}:{" "}
-          <span class="secret mono" data-secret={props.secret}>
-            {props.secret}
-          </span>
-          <br />
-          <span class="muted">{t.passwordOnce}</span>
-        </p>
-      )}
       {d.ntp_port ? (
         <dl>
           <dt>{t.setupNtpServer}</dt>
@@ -350,6 +335,19 @@ function SetupHelp(props: { t: Messages; env: Env; d: Device; host: string; secr
           <dd class="mono">{fqdn(props.env, d)}</dd>
           <dt>{t.setupUser}</dt>
           <dd class="mono">{d.slug}</dd>
+          <dt>{t.password}</dt>
+          <dd>
+            <span class="mono">{pass}</span>
+            <button
+              type="button"
+              class="link"
+              data-show={t.showPassword}
+              data-hide={t.hidePassword}
+              onclick="const c=this.closest('.card');c.toggleAttribute('data-hidden');this.textContent=c.hasAttribute('data-hidden')?this.dataset.show:this.dataset.hide"
+            >
+              {t.showPassword}
+            </button>
+          </dd>
           <dt>{t.setupFullUrl}</dt>
           <dd class="mono" style="word-break:break-all">
             https://{d.slug}:{pass}@{props.host}/nic/update?hostname={fqdn(props.env, d)}&amp;myip=&lt;ip&gt;
@@ -360,12 +358,20 @@ function SetupHelp(props: { t: Messages; env: Env; d: Device; host: string; secr
   );
 }
 
+// Port for a device that should (or should not) listen on NTP: it keeps the
+// one it has, or gets the first free one. "full" when none is left.
+async function ntpPort(env: Env, wanted: boolean, current: number | null): Promise<number | null | "full"> {
+  if (!wanted) return null;
+  return current ?? (await nextFreePort(env)) ?? "full";
+}
+
 panel.post("/devices", async (c) => {
   const t = c.get("t");
   const host = hostOf(c.req.url);
   const v = await readForm(c);
-  const error = await validate(c.env, t, host, v, null);
-  if (error)
+  const port = await ntpPort(c.env, v.ntp, null);
+  const error = (await validate(c.env, t, host, v, null)) ?? (port === "full" ? t.errNoFreePort : null);
+  if (error || port === "full")
     return c.html(
       <Layout title={t.newDevice} user={c.get("user")} t={t}>
         <h1>{t.newDevice}</h1>
@@ -375,40 +381,29 @@ panel.post("/devices", async (c) => {
           host={host}
           action="/admin/devices"
           values={v}
-          error={error}
+          error={error ?? undefined}
           isNew
-          freePort={await nextFreePort(c.env)}
         />
       </Layout>,
       422,
     );
 
-  const secret = newSecret();
   const d = (await c.env.DB.prepare(
-    `insert into devices (slug, label, notes, password_hash, ntp_port, legacy_hostname, legacy_http, alert_hours)
-     values (?, ?, ?, ?, ?, ?, ?, ?) returning *`,
+    `insert into devices (slug, label, notes, password, ntp_port, legacy_hostname, legacy_http, alert_hours)
+     values (?, ?, ?, ?, ?, ?, ?, ?) returning id`,
   )
     .bind(
       v.slug,
       v.label,
       v.notes,
-      await sha256(secret),
-      v.ntp_port ? Number(v.ntp_port) : null,
+      newSecret(),
+      port,
       v.legacy_hostname || null,
       v.legacy_http ? 1 : 0,
       Number(v.alert_hours),
     )
-    .first<Device>())!;
-
-  return c.html(
-    <Layout title={d.label} user={c.get("user")} t={t}>
-      <h1>{t.created(d.label)}</h1>
-      <SetupHelp t={t} env={c.env} d={d} host={host} secret={secret} />
-      <a class="btn" href={`/admin/devices/${d.id}`}>
-        {t.goToDevice}
-      </a>
-    </Layout>,
-  );
+    .first<{ id: number }>())!;
+  return c.redirect(`/admin/devices/${d.id}`, 303);
 });
 
 panel.get("/devices/:id{[0-9]+}", async (c) => {
@@ -466,19 +461,23 @@ panel.get("/devices/:id{[0-9]+}", async (c) => {
         host={host}
         action={`/admin/devices/${d.id}`}
         isNew={false}
-        freePort={await nextFreePort(c.env)}
         values={{
           slug: d.slug,
           label: d.label,
           notes: d.notes,
-          ntp_port: d.ntp_port ? String(d.ntp_port) : "",
+          ntp: d.ntp_port !== null,
           legacy_hostname: d.legacy_hostname ?? "",
           legacy_http: d.legacy_http === 1,
           alert_hours: String(d.alert_hours),
         }}
       />
       <div class="card">
-        <form class="inline" method="post" action={`/admin/devices/${d.id}/rotate`}>
+        <form
+          class="inline"
+          method="post"
+          action={`/admin/devices/${d.id}/rotate`}
+          onsubmit={`return confirm(${JSON.stringify(t.rotateConfirm)})`}
+        >
           <button class="btn" type="submit">
             {t.rotatePassword}
           </button>
@@ -509,8 +508,9 @@ panel.post("/devices/:id{[0-9]+}", async (c) => {
   const d = await getById(c.env, Number(c.req.param("id")));
   if (!d) return c.notFound();
   const v = { ...(await readForm(c)), slug: d.slug };
-  const error = await validate(c.env, t, host, v, d.id);
-  if (error)
+  const port = await ntpPort(c.env, v.ntp, d.ntp_port);
+  const error = (await validate(c.env, t, host, v, d.id)) ?? (port === "full" ? t.errNoFreePort : null);
+  if (error || port === "full")
     return c.html(
       <Layout title={d.label} user={c.get("user")} t={t}>
         <h1>{d.label}</h1>
@@ -520,9 +520,8 @@ panel.post("/devices/:id{[0-9]+}", async (c) => {
           host={host}
           action={`/admin/devices/${d.id}`}
           values={v}
-          error={error}
+          error={error ?? undefined}
           isNew={false}
-          freePort={null}
         />
       </Layout>,
       422,
@@ -533,7 +532,7 @@ panel.post("/devices/:id{[0-9]+}", async (c) => {
     .bind(
       v.label,
       v.notes,
-      v.ntp_port ? Number(v.ntp_port) : null,
+      port,
       v.legacy_hostname || null,
       v.legacy_http ? 1 : 0,
       Number(v.alert_hours),
@@ -544,21 +543,9 @@ panel.post("/devices/:id{[0-9]+}", async (c) => {
 });
 
 panel.post("/devices/:id{[0-9]+}/rotate", async (c) => {
-  const t = c.get("t");
-  const d = await getById(c.env, Number(c.req.param("id")));
-  if (!d) return c.notFound();
-  const secret = newSecret();
-  await c.env.DB.prepare("update devices set password_hash = ? where id = ?").bind(await sha256(secret), d.id).run();
-  return c.html(
-    <Layout title={d.label} user={c.get("user")} t={t}>
-      <h1>{t.newPasswordFor(d.label)}</h1>
-      <p>{t.oldPasswordGone}</p>
-      <SetupHelp t={t} env={c.env} d={d} host={hostOf(c.req.url)} secret={secret} />
-      <a class="btn" href={`/admin/devices/${d.id}`}>
-        {t.backToDevice}
-      </a>
-    </Layout>,
-  );
+  const id = Number(c.req.param("id"));
+  await c.env.DB.prepare("update devices set password = ? where id = ?").bind(newSecret(), id).run();
+  return c.redirect(`/admin/devices/${id}`, 303);
 });
 
 panel.post("/devices/:id{[0-9]+}/toggle", async (c) => {

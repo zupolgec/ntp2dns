@@ -1,4 +1,4 @@
-import { exports } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { vi } from "vitest";
 
 // Fake of the only third-party services the Worker talks to:
@@ -71,18 +71,18 @@ export function basic(user: string, pass: string) {
 export type NewDevice = {
   slug: string;
   label?: string;
-  ntp_port?: string;
+  ntp?: boolean;
   legacy_hostname?: string;
   legacy_http?: boolean;
 };
 
 // Creates a device through the panel, like the user would, and returns the
-// one-time password shown on the result page.
+// password shown on its page.
 export async function createDevice(d: NewDevice): Promise<string> {
   const form = new FormData();
   form.set("slug", d.slug);
   form.set("label", d.label ?? d.slug);
-  form.set("ntp_port", d.ntp_port ?? "");
+  if (d.ntp) form.set("ntp", "on");
   form.set("legacy_hostname", d.legacy_hostname ?? "");
   if (d.legacy_http) form.set("legacy_http", "on");
   form.set("alert_hours", "24");
@@ -91,12 +91,22 @@ export async function createDevice(d: NewDevice): Promise<string> {
     body: form,
     headers: { origin: ADMIN },
   });
-  const html = await res.text();
-  if (res.status !== 200) {
+  if (res.status !== 303) {
+    const html = await res.text();
     const shown = html.match(/<p class="error">([^<]*)<\/p>/)?.[1];
     throw new Error(`create failed ${res.status}: ${shown ?? html}`);
   }
+  // NTP devices never send a password, so their page doesn't show one.
+  return d.ntp ? "" : shownPassword(res.headers.get("location")!);
+}
+
+export async function shownPassword(devicePath: string): Promise<string> {
+  const html = await (await fetchWorker(`${ADMIN}${devicePath}`)).text();
   const m = html.match(/data-secret="([^"]+)"/);
-  if (!m) throw new Error("no secret in page");
+  if (!m) throw new Error("no password on the device page");
   return m[1];
+}
+
+export async function deviceId(slug: string): Promise<number> {
+  return (await env.DB.prepare("select id from devices where slug = ?").bind(slug).first<{ id: number }>())!.id;
 }

@@ -1,5 +1,5 @@
 import type { Context } from "hono";
-import { sha256, safeEqual } from "./crypto";
+import { safeEqual } from "./crypto";
 import { fqdn, getByLegacyHttp, getBySlug, parseIp, report } from "./devices";
 import type { Env } from "./env";
 
@@ -32,7 +32,7 @@ export async function nicUpdate(c: C) {
     return text(c, "badauth", 401);
   }
   const device = await getBySlug(c.env, creds[0].toLowerCase());
-  if (!device || !safeEqual(device.password_hash, await sha256(creds[1]))) return text(c, "badauth", 401);
+  if (!device || !safeEqual(device.password, creds[1])) return text(c, "badauth", 401);
   if (!device.enabled) return text(c, "nohost");
 
   const hostnames = (c.req.query("hostname") ?? "").toLowerCase().split(",").filter(Boolean);
