@@ -1,0 +1,102 @@
+import { exports } from "cloudflare:workers";
+import { vi } from "vitest";
+
+// Fake of the only third-party services the Worker talks to:
+// the Cloudflare DNS API and members.dyndns.org.
+export type FakeRecord = { id: string; type: string; name: string; content: string; ttl: number; proxied: boolean };
+
+export function fakeUpstreams() {
+  const records: FakeRecord[] = [];
+  const dynCalls: { url: URL; auth: string | null }[] = [];
+  const cfCalls: { method: string; url: URL }[] = [];
+  let nextId = 1;
+
+  const realFetch = globalThis.fetch;
+  const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const req = new Request(input as RequestInfo, init);
+    const url = new URL(req.url);
+
+    if (url.hostname === "api.cloudflare.com") {
+      cfCalls.push({ method: req.method, url });
+      if (req.headers.get("authorization") !== "Bearer cf-test-token") {
+        return Response.json({ success: false, errors: [{ message: "auth" }] }, { status: 403 });
+      }
+      const base = "/client/v4/zones/zone1/dns_records";
+      if (req.method === "GET" && url.pathname === base) {
+        const found = records.filter(
+          (r) => r.name === url.searchParams.get("name") && r.type === url.searchParams.get("type"),
+        );
+        return Response.json({ success: true, result: found });
+      }
+      if (req.method === "POST" && url.pathname === base) {
+        const body = (await req.json()) as Omit<FakeRecord, "id">;
+        const rec = { ...body, id: `rec${nextId++}` };
+        records.push(rec);
+        return Response.json({ success: true, result: rec });
+      }
+      const id = url.pathname.slice(base.length + 1);
+      const rec = records.find((r) => r.id === id);
+      if (!rec) return Response.json({ success: false, errors: [{ message: "not found" }] }, { status: 404 });
+      if (req.method === "PATCH") {
+        Object.assign(rec, await req.json());
+        return Response.json({ success: true, result: rec });
+      }
+      if (req.method === "DELETE") {
+        records.splice(records.indexOf(rec), 1);
+        return Response.json({ success: true, result: { id } });
+      }
+    }
+
+    if (url.hostname === "members.dyndns.org") {
+      dynCalls.push({ url, auth: req.headers.get("authorization") });
+      return new Response(`good ${url.searchParams.get("myip")}`);
+    }
+
+    return realFetch(input as RequestInfo, init);
+  });
+
+  return { records, dynCalls, cfCalls, restore: () => spy.mockRestore() };
+}
+
+export const ADMIN = "http://localhost";
+
+export function fetchWorker(url: string, init?: RequestInit) {
+  return exports.default.fetch(new Request(url, { redirect: "manual", ...init }));
+}
+
+export function basic(user: string, pass: string) {
+  return "Basic " + btoa(`${user}:${pass}`);
+}
+
+export type NewDevice = {
+  slug: string;
+  label?: string;
+  ntp_port?: string;
+  legacy_hostname?: string;
+  legacy_http?: boolean;
+};
+
+// Creates a device through the panel, like the user would, and returns the
+// one-time password shown on the result page.
+export async function createDevice(d: NewDevice): Promise<string> {
+  const form = new FormData();
+  form.set("slug", d.slug);
+  form.set("label", d.label ?? d.slug);
+  form.set("ntp_port", d.ntp_port ?? "");
+  form.set("legacy_hostname", d.legacy_hostname ?? "");
+  if (d.legacy_http) form.set("legacy_http", "on");
+  form.set("alert_hours", "24");
+  const res = await fetchWorker(`${ADMIN}/admin/devices`, {
+    method: "POST",
+    body: form,
+    headers: { origin: ADMIN },
+  });
+  const html = await res.text();
+  if (res.status !== 200) {
+    const shown = html.match(/<p class="error">([^<]*)<\/p>/)?.[1];
+    throw new Error(`create failed ${res.status}: ${shown ?? html}`);
+  }
+  const m = html.match(/data-secret="([^"]+)"/);
+  if (!m) throw new Error("no secret in page");
+  return m[1];
+}

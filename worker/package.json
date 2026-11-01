@@ -1,0 +1,32 @@
+{
+  "name": "ntp2dns-worker",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "wrangler dev --local-upstream localhost:8787",
+    "dev:fake-cloudflare": "node e2e/fake-cloudflare.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc",
+    "deploy": "wrangler deploy"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.16.1",
+      "onFail": "download"
+    }
+  },
+  "packageManager": "pnpm@12.16.1",
+  "type": "module",
+  "dependencies": {
+    "hono": "^4.13.14",
+    "jose": "^6.2.14"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.4.11",
+    "@cloudflare/workers-types": "^5.20261031.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.12",
+    "wrangler": "^4.156.0"
+  },
+  "private": true
+}

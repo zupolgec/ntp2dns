@@ -1,0 +1,30 @@
+// Example configuration. For a real deployment copy it to
+// wrangler.production.jsonc (ignored by git) and deploy with
+// `wrangler deploy -c wrangler.production.jsonc`.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ddns",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "routes": [{ "pattern": "ddns.example.com", "custom_domain": true }],
+  "d1_databases": [
+    { "binding": "DB", "database_name": "ddns", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
+  ],
+  "vars": {
+    // Devices get <name>.<ZONE_NAME>; CF_ZONE_ID is the Cloudflare zone holding that name.
+    "ZONE_NAME": "dyn.example.com",
+    "CF_ZONE_ID": "your-zone-id",
+    // Cloudflare Access application protecting /admin.
+    "ACCESS_TEAM_DOMAIN": "your-team.cloudflareaccess.com",
+    "ACCESS_AUD": "your-access-application-aud",
+    // Public IPv4 of the server running ntp-agent (shown in the setup help).
+    "NTP_HOST": "203.0.113.10",
+    "NTP_PORT_MIN": "55123",
+    "NTP_PORT_MAX": "55199",
+    "PANEL_LANG": "en",
+    "TIME_ZONE": "UTC"
+  }
+  // Secrets (wrangler secret put): CF_API_TOKEN (Zone DNS Edit on that zone only),
+  // AGENT_TOKEN, and optionally DYN_USERNAME + DYN_UPDATER_KEY to keep old
+  // dyndns.org names updated during a migration.
+}

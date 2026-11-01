@@ -1,0 +1,34 @@
+[Unit]
+Description=ntp2dns NTP agent
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+# /etc/ntp-agent/env (root, 0600):
+#   DDNS_API=https://ddns.example.com
+#   DDNS_AGENT_TOKEN=...
+EnvironmentFile=/etc/ntp-agent/env
+ExecStart=/usr/local/bin/ntp-agent serve -cache /var/lib/ntp-agent/ports.json
+DynamicUser=yes
+StateDirectory=ntp-agent
+Restart=always
+RestartSec=5
+
+# Ports are above 1024: no privileges needed.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
