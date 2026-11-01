@@ -5,14 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -27,22 +26,36 @@ type reportEntry struct {
 	IP   string `json:"ip"`
 }
 
-// Agent answers NTP requests on one UDP port per device and tells the Worker
-// which address each device is calling from.
+// backend knows which ports to serve and where to send the addresses seen on
+// them: the ntp2dns Worker, or any dyndns2 provider listed in a config file.
+type backend interface {
+	Ports(ctx context.Context) ([]portEntry, error)
+	// Report returns one outcome per entry, in order.
+	Report(ctx context.Context, batch []reportEntry) []outcome
+	// Cacheable: the port list can change remotely, so keep a copy on disk.
+	Cacheable() bool
+}
+
+type outcome struct {
+	Result   string
+	Retry    bool // temporary failure: send the same report again later
+	Rejected bool // refused for good: not sent again until the address changes
+}
+
+// Agent answers NTP requests on one UDP port per device and reports the
+// address each device is calling from to its backend.
 type Agent struct {
-	API            string // Worker base URL, e.g. https://ddns.example.com
-	Token          string
+	Backend        backend
 	ListenIP       string // empty: all addresses
 	ConfigInterval time.Duration
 	FlushInterval  time.Duration
-	Heartbeat      time.Duration // re-report an unchanged IP this often, so the panel sees the device alive
+	Heartbeat      time.Duration // re-report an unchanged IP this often, so the panel sees the device alive; 0: never
 	CachePath      string        // last known port list, used when the Worker is unreachable at start
 	Reply          replyOptions
 	Clock          func() clockState
 	RatePerSecond  float64 // per source IP
 	RateBurst      float64
 	Log            *slog.Logger
-	HTTP           *http.Client
 
 	mu        sync.Mutex
 	listeners map[int]*listener
@@ -72,12 +85,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.reported = map[int]reportState{}
 	a.pending = map[int]string{}
 	a.buckets = map[string]*bucket{}
-	if a.HTTP == nil {
-		a.HTTP = &http.Client{Timeout: 15 * time.Second}
-	}
 
-	if ports, err := a.readCache(); err == nil {
-		a.apply(ports)
+	if a.Backend.Cacheable() {
+		if ports, err := a.readCache(); err == nil {
+			a.apply(ports)
+		}
 	}
 	a.refreshConfig(ctx)
 
@@ -111,42 +123,19 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 }
 
-func (a *Agent) request(ctx context.Context, method, path string, body any, out any) error {
-	var rd *bytes.Reader
-	if body != nil {
-		b, _ := json.Marshal(body)
-		rd = bytes.NewReader(b)
-	} else {
-		rd = bytes.NewReader(nil)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, a.API+path, rd)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+a.Token)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "ntp2dns-agent/1.0")
-	res, err := a.HTTP.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != 200 {
-		return fmt.Errorf("%s %s: HTTP %d", method, path, res.StatusCode)
-	}
-	return json.NewDecoder(res.Body).Decode(out)
-}
-
 func (a *Agent) refreshConfig(ctx context.Context) {
-	var cfg struct{ Ports []portEntry }
-	if err := a.request(ctx, "GET", "/agent/config", nil, &cfg); err != nil {
+	ports, err := a.Backend.Ports(ctx)
+	if err != nil {
 		if ctx.Err() == nil {
 			a.Log.Warn("cannot load port list, keeping the current one", "err", err)
 		}
 		return
 	}
-	a.apply(cfg.Ports)
-	if err := a.writeCache(cfg.Ports); err != nil {
+	a.apply(ports)
+	if !a.Backend.Cacheable() {
+		return
+	}
+	if err := a.writeCache(ports); err != nil {
 		a.Log.Warn("cannot write cache", "err", err)
 	}
 }
@@ -253,7 +242,7 @@ func (a *Agent) seen(port int, ip string) {
 		return
 	}
 	r := a.reported[port]
-	if r.ip != ip || time.Since(r.at) >= a.Heartbeat {
+	if r.ip != ip || (a.Heartbeat > 0 && time.Since(r.at) >= a.Heartbeat) {
 		a.pending[port] = ip
 	}
 }
@@ -270,28 +259,39 @@ func (a *Agent) flush(ctx context.Context) error {
 	}
 	slices.SortFunc(batch, func(x, y reportEntry) int { return x.Port - y.Port })
 
-	var out struct {
-		Results []struct {
-			Port   int
-			Result string
-		}
-	}
-	if err := a.request(ctx, "POST", "/agent/report", map[string]any{"reports": batch}, &out); err != nil {
-		return err
-	}
+	results := a.Backend.Report(ctx, batch)
 	now := time.Now()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for _, r := range batch {
+	var failed []string
+	for i, r := range batch {
+		res := results[i]
+		if res.Retry {
+			failed = append(failed, res.Result)
+			continue
+		}
 		a.reported[r.Port] = reportState{ip: r.IP, at: now}
 		if a.pending[r.Port] == r.IP {
 			delete(a.pending, r.Port)
 		}
+		log := a.Log.Info
+		if res.Rejected {
+			log = a.Log.Error
+		}
+		log("reported", "port", r.Port, "device", a.deviceName(r.Port), "ip", r.IP, "result", res.Result)
 	}
-	for _, res := range out.Results {
-		a.Log.Info("reported", "port", res.Port, "result", res.Result)
+	if len(failed) > 0 {
+		return errors.New(strings.Join(slices.Compact(failed), "; "))
 	}
 	return nil
+}
+
+// deviceName must be called with a.mu held.
+func (a *Agent) deviceName(port int) string {
+	if l, ok := a.listeners[port]; ok {
+		return l.device
+	}
+	return ""
 }
 
 func (a *Agent) readCache() ([]portEntry, error) {

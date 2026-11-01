@@ -1,7 +1,10 @@
 # ntp2dns
 
-Dynamic DNS on Cloudflare: Worker + D1 with dyndns2 endpoint and admin panel
-(`worker/`), and a Go NTP agent (`ntp-agent/`). See `README.md`. Public, MIT.
+Dynamic DNS through NTP: a Go agent (`ntp-agent/`) that gives each device an
+NTP port and updates its name with any dyndns2 provider (config file) or with
+the optional Cloudflare backend: Worker + D1 with dyndns2 endpoint and admin
+panel (`worker/`). Keep the agent provider-independent. See `README.md`.
+Public, MIT.
 
 - Everything committed here is public: no client names, internal hosts, IPs or
   deployment notes. Real deployments use `worker/wrangler.production.jsonc`

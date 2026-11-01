@@ -1,0 +1,24 @@
+{
+  "devices": [
+    {
+      "port": 55123,
+      "name": "front-gate",
+      "url": "https://members.dyndns.org/nic/update",
+      "hostname": "front-gate.dyndns.org",
+      "username": "your-username",
+      "password": "your-updater-key"
+    },
+    {
+      "port": 55124,
+      "url": "https://update.dedyn.io/",
+      "hostname": "nvr.dedyn.io",
+      "username": "nvr.dedyn.io",
+      "password": "your-desec-token"
+    },
+    {
+      "port": 55125,
+      "name": "camera",
+      "url": "https://www.duckdns.org/update?domains=camera&token=your-token&ip={ip}"
+    }
+  ]
+}

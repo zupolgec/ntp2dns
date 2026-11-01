@@ -1,6 +1,7 @@
 // ntp-agent answers NTP requests on one UDP port per device, using the
-// server's own synchronised clock, and reports each device's public IP to the
-// ddns Worker, which updates its DNS name.
+// server's own synchronised clock, and updates each device's DNS name with the
+// address it calls from: through the ntp2dns Worker, or straight with any
+// dyndns2 provider listed in a config file.
 package main
 
 import (
@@ -19,8 +20,10 @@ const usage = `usage:
   ntp-agent serve [flags]     run the agent
   ntp-agent probe HOST:PORT   send one NTP request and print the answer
 
-Settings can also come from the environment: DDNS_API, DDNS_AGENT_TOKEN
-(or DDNS_AGENT_TOKEN_FILE).
+serve needs one of:
+  -config FILE   devices and their dyndns2 providers (or DDNS_CONFIG)
+  -api URL       the ntp2dns Worker (or DDNS_API), with DDNS_AGENT_TOKEN
+                 or -token-file (DDNS_AGENT_TOKEN_FILE)
 `
 
 func main() {
@@ -48,11 +51,12 @@ func env(key, def string) string {
 
 func serveCmd(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	config := fs.String("config", env("DDNS_CONFIG", ""), "JSON file listing ports and their dyndns2 providers")
 	api := fs.String("api", env("DDNS_API", ""), "Worker base URL, e.g. https://ddns.example.com")
 	tokenFile := fs.String("token-file", env("DDNS_AGENT_TOKEN_FILE", ""), "file holding the agent token (else DDNS_AGENT_TOKEN)")
 	listen := fs.String("listen", "", "IP to listen on (default: all)")
 	configEvery := fs.Duration("config-interval", time.Minute, "how often to reload the port list")
-	heartbeat := fs.Duration("heartbeat", 15*time.Minute, "re-report an unchanged IP this often")
+	heartbeat := fs.Duration("heartbeat", 15*time.Minute, "re-report an unchanged IP this often (Worker only)")
 	cache := fs.String("cache", "/var/lib/ntp-agent/ports.json", "port list cache, used if the Worker is unreachable at start")
 	stratum := fs.Int("stratum", 3, "stratum to announce")
 	refID := fs.String("refid", "LOCL", "reference id to announce (4 chars or upstream IPv4)")
@@ -61,21 +65,37 @@ func serveCmd(args []string) int {
 	verbose := fs.Bool("v", false, "debug logging")
 	fs.Parse(args)
 
-	token := os.Getenv("DDNS_AGENT_TOKEN")
-	if *tokenFile != "" {
-		b, err := os.ReadFile(*tokenFile)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "cannot read token file:", err)
-			return 1
-		}
-		token = strings.TrimSpace(string(b))
-	}
-	if *api == "" {
-		fmt.Fprintln(os.Stderr, "missing Worker URL: set DDNS_API or -api")
+	var b backend
+	var target string
+	switch {
+	case *config != "" && *api != "":
+		fmt.Fprintln(os.Stderr, "use either -config or -api, not both")
 		return 2
-	}
-	if token == "" {
-		fmt.Fprintln(os.Stderr, "missing agent token: set DDNS_AGENT_TOKEN or -token-file")
+	case *config != "":
+		d, err := loadDirect(*config)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		b, target, *heartbeat = d, *config, 0
+	case *api != "":
+		token := os.Getenv("DDNS_AGENT_TOKEN")
+		if *tokenFile != "" {
+			raw, err := os.ReadFile(*tokenFile)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "cannot read token file:", err)
+				return 1
+			}
+			token = strings.TrimSpace(string(raw))
+		}
+		if token == "" {
+			fmt.Fprintln(os.Stderr, "missing agent token: set DDNS_AGENT_TOKEN or -token-file")
+			return 2
+		}
+		target = strings.TrimRight(*api, "/")
+		b = &workerBackend{API: target, Token: token}
+	default:
+		fmt.Fprint(os.Stderr, usage)
 		return 2
 	}
 	if *stratum < 1 || *stratum > 15 {
@@ -88,8 +108,7 @@ func serveCmd(args []string) int {
 		level = slog.LevelDebug
 	}
 	a := &Agent{
-		API:            strings.TrimRight(*api, "/"),
-		Token:          token,
+		Backend:        b,
 		ListenIP:       *listen,
 		ConfigInterval: *configEvery,
 		FlushInterval:  2 * time.Second,
@@ -103,7 +122,7 @@ func serveCmd(args []string) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	a.Log.Info("starting", "api", a.API, "clock_synced", systemClock().synced)
+	a.Log.Info("starting", "backend", target, "clock_synced", systemClock().synced)
 	if err := a.Run(ctx); err != nil {
 		a.Log.Error("stopped", "err", err)
 		return 1

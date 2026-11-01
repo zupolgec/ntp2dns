@@ -82,10 +82,11 @@ func freePort(t *testing.T) int {
 	return c.LocalAddr().(*net.UDPAddr).Port
 }
 
-func startAgent(t *testing.T, api string, mutate ...func(*Agent)) {
+func worker(api string) backend { return &workerBackend{API: api, Token: "test-token"} }
+
+func startAgent(t *testing.T, b backend, mutate ...func(*Agent)) {
 	a := &Agent{
-		API:            api,
-		Token:          "test-token",
+		Backend:        b,
 		ListenIP:       "127.0.0.1",
 		ConfigInterval: 100 * time.Millisecond,
 		FlushInterval:  50 * time.Millisecond,
@@ -136,7 +137,7 @@ func eventually(t *testing.T, what string, cond func() bool) {
 func TestAnswersTimeAndReportsTheCallerIP(t *testing.T) {
 	p := freePort(t)
 	api := newFakeAPI(t, portEntry{Port: p, Device: "nvr-a"})
-	startAgent(t, api.srv.URL)
+	startAgent(t, worker(api.srv.URL))
 
 	r := waitAnswer(t, p)
 	if r.Offset.Abs() > time.Second {
@@ -154,7 +155,7 @@ func TestAnswersTimeAndReportsTheCallerIP(t *testing.T) {
 func TestReportsOnlyWhenTheIPChanges(t *testing.T) {
 	p := freePort(t)
 	api := newFakeAPI(t, portEntry{Port: p, Device: "nvr-b"})
-	startAgent(t, api.srv.URL)
+	startAgent(t, worker(api.srv.URL))
 
 	waitAnswer(t, p)
 	eventually(t, "first report", func() bool { return len(api.got()) == 1 })
@@ -170,7 +171,7 @@ func TestReportsOnlyWhenTheIPChanges(t *testing.T) {
 func TestSendsAHeartbeatForSilentlyStableDevices(t *testing.T) {
 	p := freePort(t)
 	api := newFakeAPI(t, portEntry{Port: p, Device: "nvr-c"})
-	startAgent(t, api.srv.URL, func(a *Agent) { a.Heartbeat = 150 * time.Millisecond })
+	startAgent(t, worker(api.srv.URL), func(a *Agent) { a.Heartbeat = 150 * time.Millisecond })
 
 	waitAnswer(t, p)
 	eventually(t, "first report", func() bool { return len(api.got()) == 1 })
@@ -182,7 +183,7 @@ func TestSendsAHeartbeatForSilentlyStableDevices(t *testing.T) {
 func TestFollowsPortChangesFromThePanel(t *testing.T) {
 	p, q := freePort(t), freePort(t)
 	api := newFakeAPI(t, portEntry{Port: p, Device: "nvr-d"})
-	startAgent(t, api.srv.URL)
+	startAgent(t, worker(api.srv.URL))
 	waitAnswer(t, p)
 
 	api.setPorts(portEntry{Port: q, Device: "nvr-d"})
@@ -197,7 +198,7 @@ func TestRetriesReportsWhenTheAPIFails(t *testing.T) {
 	p := freePort(t)
 	api := newFakeAPI(t, portEntry{Port: p, Device: "nvr-e"})
 	api.failNext = 2
-	startAgent(t, api.srv.URL)
+	startAgent(t, worker(api.srv.URL))
 
 	waitAnswer(t, p)
 	eventually(t, "report after retries", func() bool { return len(api.got()) == 1 })
@@ -210,7 +211,7 @@ func TestKeepsServingFromCacheWhenTheAPIIsDown(t *testing.T) {
 	if err := os.WriteFile(cache, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	startAgent(t, "http://127.0.0.1:1", func(a *Agent) { a.CachePath = cache })
+	startAgent(t, worker("http://127.0.0.1:1"), func(a *Agent) { a.CachePath = cache })
 	waitAnswer(t, p)
 }
 
@@ -218,7 +219,7 @@ func TestWritesTheCacheAfterLoadingConfig(t *testing.T) {
 	p := freePort(t)
 	api := newFakeAPI(t, portEntry{Port: p, Device: "nvr-g"})
 	cache := filepath.Join(t.TempDir(), "ports.json")
-	startAgent(t, api.srv.URL, func(a *Agent) { a.CachePath = cache })
+	startAgent(t, worker(api.srv.URL), func(a *Agent) { a.CachePath = cache })
 	waitAnswer(t, p)
 	eventually(t, "cache file", func() bool {
 		var got []portEntry
@@ -230,7 +231,7 @@ func TestWritesTheCacheAfterLoadingConfig(t *testing.T) {
 func TestRateLimitsFloods(t *testing.T) {
 	p := freePort(t)
 	api := newFakeAPI(t, portEntry{Port: p, Device: "nvr-h"})
-	startAgent(t, api.srv.URL, func(a *Agent) { a.RatePerSecond = 1; a.RateBurst = 3 })
+	startAgent(t, worker(api.srv.URL), func(a *Agent) { a.RatePerSecond = 1; a.RateBurst = 3 })
 	waitAnswer(t, p) // uses up part of the burst
 
 	answered := 0
