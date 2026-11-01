@@ -46,9 +46,8 @@ the DNS records in your own zone and gives you a small admin panel.
   - A small admin panel on `/admin` behind Cloudflare Access: devices, current
     IP, last contact, "not responding" flag, IP history, credentials, NTP ports.
     English or Italian.
-  - Optional mirroring to an old `*.dyndns.org` name, and an optional plain
-    `/?host=<old name>` link for devices that can only call a fixed URL, so
-    devices can be moved over one at a time.
+  - Optional mirroring to an old `*.dyndns.org` name, so devices can be moved
+    over one at a time.
 
 ## NTP agent
 

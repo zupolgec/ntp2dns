@@ -286,7 +286,6 @@ panel.get("/devices/new", async (c) => {
       <DeviceForm
         t={t}
         env={c.env}
-        host={hostOf(c.req.url)}
         action="/admin/devices"
         values={empty}
         isNew
