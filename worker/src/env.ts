@@ -10,9 +10,9 @@ export type Env = {
   ACCESS_AUD?: string;
   // Shown in the setup help of NTP devices: public address of the NTP agent.
   NTP_HOST?: string;
-  // UDP port range the panel hands out to NTP devices (default 55123-55199).
-  NTP_PORT_MIN?: string;
-  NTP_PORT_MAX?: string;
+  // UDP port range the panel hands out to NTP devices, e.g. "55123-55142".
+  // The same range must be open in the firewall of the agent's server.
+  NTP_PORTS: string;
   // Panel language: "en" (default) or "it".
   PANEL_LANG?: string;
   // Time zone for dates in the panel (default UTC), e.g. "Europe/Rome".

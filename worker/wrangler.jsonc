@@ -19,8 +19,8 @@
     "ACCESS_AUD": "your-access-application-aud",
     // Public IPv4 of the server running ntp-agent (shown in the setup help).
     "NTP_HOST": "203.0.113.10",
-    "NTP_PORT_MIN": "55123",
-    "NTP_PORT_MAX": "55199",
+    // UDP ports handed out to NTP devices: open the same range in the firewall.
+    "NTP_PORTS": "55123-55199",
     "PANEL_LANG": "en",
     "TIME_ZONE": "UTC"
   }

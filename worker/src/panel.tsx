@@ -14,10 +14,12 @@ panel.use(requireAccess);
 // when the zone is shared with them.
 const RESERVED_SLUGS = new Set(["www", "ddns", "dyn", "api", "admin", "mail", "smtp", "imap", "ns1", "ns2"]);
 
-const portRange = (env: Env) => ({
-  min: Number(env.NTP_PORT_MIN ?? 55123),
-  max: Number(env.NTP_PORT_MAX ?? 55199),
-});
+function portRange(env: Env) {
+  const m = /^(\d+)-(\d+)$/.exec(env.NTP_PORTS ?? "");
+  const [min, max] = m ? [Number(m[1]), Number(m[2])] : [0, -1];
+  if (min < 1 || max > 65535 || min > max) throw new Error(`NTP_PORTS must be a range like 55123-55142, got "${env.NTP_PORTS}"`);
+  return { min, max };
+}
 
 const css = `
 :root{color-scheme:light dark;--bg:#f6f6f4;--card:#fff;--fg:#1d1d1b;--muted:#6b6b66;--line:#e3e3df;--ok:#1f7a4d;--warn:#b54708;--off:#8a8a85;--accent:#2b59c3}

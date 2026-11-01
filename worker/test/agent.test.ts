@@ -1,3 +1,5 @@
+import { env } from "cloudflare:workers";
+import app from "../src/index";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ADMIN, createDevice, deviceId, fakeUpstreams, fetchWorker } from "./helpers";
 
@@ -73,5 +75,27 @@ describe("NTP agent API", () => {
   it("refuses a wrong agent token", async () => {
     const res = await fetchWorker(`${HOST}/agent/config`, { headers: { authorization: "Bearer nope" } });
     expect(res.status).toBe(401);
+  });
+
+  it("hands out ports only from the NTP_PORTS range", async () => {
+    const narrow = { ...env, NTP_PORTS: "60001-60002" };
+    const create = (slug: string) => {
+      const form = new FormData();
+      form.set("slug", slug);
+      form.set("label", slug);
+      form.set("ntp", "on");
+      form.set("alert_hours", "24");
+      return app.fetch(
+        new Request(`${ADMIN}/admin/devices`, { method: "POST", body: form, headers: { origin: ADMIN }, redirect: "manual" }),
+        narrow,
+      );
+    };
+    expect((await create("range-a")).status).toBe(303);
+    expect((await create("range-b")).status).toBe(303);
+    const full = await create("range-c");
+    expect(full.status).toBe(422);
+    expect(await full.text()).toContain("no free time server (NTP) ports");
+    const ports = [await portOf("range-a"), await portOf("range-b")].sort();
+    expect(ports).toEqual([60001, 60002]);
   });
 });

@@ -23,8 +23,7 @@ export default defineConfig(async () => {
             // Pinned so a local .dev.vars never changes what the tests see.
             PANEL_LANG: "en",
             TIME_ZONE: "UTC",
-            NTP_PORT_MIN: "55123",
-            NTP_PORT_MAX: "55199",
+            NTP_PORTS: "55123-55199",
           },
         },
       }),
