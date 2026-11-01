@@ -515,7 +515,8 @@ panel.post("/devices/:id{[0-9]+}", async (c) => {
       422,
     );
   await c.env.DB.prepare(
-    "update devices set label = ?, notes = ?, ntp_port = ?, legacy_hostname = ?, alert_hours = ? where id = ?",
+    `update devices set label = ?, notes = ?, ntp_port = ?, legacy_hostname = ?, alert_hours = ?,
+       legacy_ip = case when legacy_hostname is ? then legacy_ip end where id = ?`,
   )
     .bind(
       v.label,
@@ -523,6 +524,7 @@ panel.post("/devices/:id{[0-9]+}", async (c) => {
       port,
       v.legacy_hostname || null,
       Number(v.alert_hours),
+      v.legacy_hostname || null,
       d.id,
     )
     .run();

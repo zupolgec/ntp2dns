@@ -37,9 +37,10 @@ type backend interface {
 }
 
 type outcome struct {
-	Result   string
-	Retry    bool // temporary failure: send the same report again later
-	Rejected bool // refused for good: not sent again until the address changes
+	Result     string
+	Retry      bool          // temporary failure: send the latest address again later
+	RetryAfter time.Duration // how long the provider asked to wait; 0: short backoff
+	Rejected   bool          // refused for good: the device is not reported again until the configuration changes
 }
 
 // Agent answers NTP requests on one UDP port per device and reports the
@@ -55,13 +56,22 @@ type Agent struct {
 	Clock          func() clockState
 	RatePerSecond  float64 // per source IP
 	RateBurst      float64
+	GlobalRate     float64 // all sources together; 0: no limit
+	GlobalBurst    float64
+	MaxSources     int // source IPs remembered by the rate limit; 0: no limit
 	Log            *slog.Logger
 
 	mu        sync.Mutex
 	listeners map[int]*listener
 	reported  map[int]reportState
-	pending   map[int]string
+	pending   map[int]string    // address to report
+	latest    map[int]string    // address the device last called from
+	retryAt   map[int]time.Time // no report before this
+	backoff   map[int]time.Duration
+	suspended map[int]bool // refused by the provider
 	buckets   map[string]*bucket
+	global    *bucket
+	lastPrune time.Time
 	wg        sync.WaitGroup
 }
 
@@ -84,6 +94,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.listeners = map[int]*listener{}
 	a.reported = map[int]reportState{}
 	a.pending = map[int]string{}
+	a.latest = map[int]string{}
+	a.retryAt = map[int]time.Time{}
+	a.backoff = map[int]time.Duration{}
+	a.suspended = map[int]bool{}
 	a.buckets = map[string]*bucket{}
 
 	if a.Backend.Cacheable() {
@@ -97,7 +111,6 @@ func (a *Agent) Run(ctx context.Context) error {
 	flushTick := time.NewTicker(a.FlushInterval)
 	defer configTick.Stop()
 	defer flushTick.Stop()
-	backoff, nextFlush := time.Duration(0), time.Time{}
 
 	for {
 		select {
@@ -107,18 +120,11 @@ func (a *Agent) Run(ctx context.Context) error {
 			return nil
 		case <-configTick.C:
 			a.refreshConfig(ctx)
-			a.pruneBuckets()
+			a.mu.Lock()
+			a.pruneBuckets(time.Now())
+			a.mu.Unlock()
 		case <-flushTick.C:
-			if time.Now().Before(nextFlush) {
-				continue
-			}
-			if err := a.flush(ctx); err != nil {
-				backoff = min(max(backoff*2, a.FlushInterval), time.Minute)
-				nextFlush = time.Now().Add(backoff)
-				a.Log.Warn("report failed, will retry", "err", err, "in", backoff)
-			} else {
-				backoff = 0
-			}
+			a.flush(ctx)
 		}
 	}
 }
@@ -154,6 +160,10 @@ func (a *Agent) apply(ports []portEntry) {
 			delete(a.listeners, port)
 			delete(a.reported, port)
 			delete(a.pending, port)
+			delete(a.latest, port)
+			delete(a.retryAt, port)
+			delete(a.backoff, port)
+			delete(a.suspended, port)
 			a.Log.Info("stopped listening", "port", port, "device", l.device)
 		}
 	}
@@ -208,28 +218,61 @@ func (a *Agent) serve(port int, l *listener) {
 	}
 }
 
+// allow applies the per-source and the overall rate limit. The table of
+// sources is bounded: when it is full, new sources wait until old ones have
+// gone quiet long enough to be forgotten.
 func (a *Agent) allow(ip string, now time.Time) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	b, ok := a.buckets[ip]
 	if !ok {
+		if a.MaxSources > 0 && len(a.buckets) >= a.MaxSources {
+			if now.Sub(a.lastPrune) < time.Second {
+				return false
+			}
+			a.pruneBuckets(now)
+			if len(a.buckets) >= a.MaxSources {
+				return false
+			}
+		}
 		b = &bucket{tokens: a.RateBurst, last: now}
 		a.buckets[ip] = b
 	}
-	b.tokens = min(a.RateBurst, b.tokens+now.Sub(b.last).Seconds()*a.RatePerSecond)
-	b.last = now
-	if b.tokens < 1 {
+	if !b.take(now, a.RatePerSecond, a.RateBurst, false) {
 		return false
+	}
+	if a.GlobalRate > 0 {
+		if a.global == nil {
+			a.global = &bucket{tokens: a.GlobalBurst, last: now}
+		}
+		if !a.global.take(now, a.GlobalRate, a.GlobalBurst, true) {
+			return false
+		}
 	}
 	b.tokens--
 	return true
 }
 
-func (a *Agent) pruneBuckets() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+// take refills the bucket and reports whether a token is there; it spends it
+// only if spend is set.
+func (b *bucket) take(now time.Time, rate, burst float64, spend bool) bool {
+	b.tokens = min(burst, b.tokens+now.Sub(b.last).Seconds()*rate)
+	b.last = now
+	if b.tokens < 1 {
+		return false
+	}
+	if spend {
+		b.tokens--
+	}
+	return true
+}
+
+// pruneBuckets forgets sources whose bucket has refilled: a fresh one would be
+// the same. Must be called with a.mu held.
+func (a *Agent) pruneBuckets(now time.Time) {
+	a.lastPrune = now
 	for ip, b := range a.buckets {
-		if time.Since(b.last) > 10*time.Minute {
+		if b.tokens+now.Sub(b.last).Seconds()*a.RatePerSecond >= a.RateBurst {
 			delete(a.buckets, ip)
 		}
 	}
@@ -238,52 +281,78 @@ func (a *Agent) pruneBuckets() {
 func (a *Agent) seen(port int, ip string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if _, ok := a.listeners[port]; !ok {
+	if _, ok := a.listeners[port]; !ok || a.suspended[port] {
 		return
 	}
+	a.latest[port] = ip
 	r := a.reported[port]
 	if r.ip != ip || (a.Heartbeat > 0 && time.Since(r.at) >= a.Heartbeat) {
 		a.pending[port] = ip
+	} else {
+		delete(a.pending, port) // back at the published address
 	}
 }
 
-func (a *Agent) flush(ctx context.Context) error {
+func (a *Agent) flush(ctx context.Context) {
+	now := time.Now()
 	a.mu.Lock()
 	batch := make([]reportEntry, 0, len(a.pending))
 	for port, ip := range a.pending {
+		if now.Before(a.retryAt[port]) {
+			continue
+		}
 		batch = append(batch, reportEntry{Port: port, IP: ip})
 	}
 	a.mu.Unlock()
 	if len(batch) == 0 {
-		return nil
+		return
 	}
 	slices.SortFunc(batch, func(x, y reportEntry) int { return x.Port - y.Port })
 
 	results := a.Backend.Report(ctx, batch)
-	now := time.Now()
+	now = time.Now()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var failed []string
+	var wait time.Duration
 	for i, r := range batch {
-		res := results[i]
+		res, name := results[i], a.deviceName(r.Port)
+		if _, ok := a.listeners[r.Port]; !ok {
+			continue // port closed while reporting
+		}
 		if res.Retry {
+			d := res.RetryAfter
+			if d == 0 {
+				d = min(max(a.backoff[r.Port]*2, a.FlushInterval), time.Minute)
+				a.backoff[r.Port] = d
+			}
+			a.retryAt[r.Port] = now.Add(d)
 			failed = append(failed, res.Result)
+			wait = max(wait, d)
+			continue
+		}
+		delete(a.retryAt, r.Port)
+		delete(a.backoff, r.Port)
+		if res.Rejected {
+			a.suspended[r.Port] = true
+			delete(a.pending, r.Port)
+			a.Log.Error("refused: not reporting this device again until the configuration changes",
+				"port", r.Port, "device", name, "ip", r.IP, "result", res.Result)
 			continue
 		}
 		a.reported[r.Port] = reportState{ip: r.IP, at: now}
 		if a.pending[r.Port] == r.IP {
 			delete(a.pending, r.Port)
 		}
-		log := a.Log.Info
-		if res.Rejected {
-			log = a.Log.Error
+		if latest := a.latest[r.Port]; latest != "" && latest != r.IP {
+			a.pending[r.Port] = latest // the device moved while we were reporting
 		}
-		log("reported", "port", r.Port, "device", a.deviceName(r.Port), "ip", r.IP, "result", res.Result)
+		a.Log.Info("reported", "port", r.Port, "device", name, "ip", r.IP, "result", res.Result)
 	}
 	if len(failed) > 0 {
-		return errors.New(strings.Join(slices.Compact(failed), "; "))
+		slices.Sort(failed)
+		a.Log.Warn("report failed, will retry", "err", strings.Join(slices.Compact(failed), "; "), "devices", len(failed), "in", wait)
 	}
-	return nil
 }
 
 // deviceName must be called with a.mu held.

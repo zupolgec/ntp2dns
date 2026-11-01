@@ -36,10 +36,13 @@ the DNS records in your own zone and gives you a small admin panel.
     queries an upstream server per request. If the OS reports the clock as
     unsynchronised, the answer says so, so devices don't trust a wrong time.
   - Sends an update only when a device's address changes. Temporary provider
-    errors are retried with backoff; refusals (wrong password, unknown host,
-    abuse) are logged and not repeated, so the account doesn't get blocked.
-  - Per-source rate limit; answers only client requests (no control or private
-    modes) and never with more bytes than it received.
+    errors are retried with backoff, and after 30 minutes when the provider
+    asks for a pause (`911`, `dnserr`) or gives an answer it doesn't
+    recognise. Refusals (wrong password, unknown host, abuse) are logged and
+    that device is not reported again until the configuration changes, so the
+    account doesn't get blocked.
+  - Rate limit per source and overall; answers only client requests (no
+    control or private modes) and never with more bytes than it received.
 - **`worker/`** (optional): a Cloudflare Worker with D1.
   - dyndns2 endpoint (`/nic/update`, `/v3/update`) with per-device credentials,
     IPv4 and IPv6, DNS touched only when the address changes.
@@ -47,7 +50,8 @@ the DNS records in your own zone and gives you a small admin panel.
     IP, last contact, "not responding" flag, IP history, credentials, NTP ports.
     English or Italian.
   - Optional mirroring to an old `*.dyndns.org` name, so devices can be moved
-    over one at a time.
+    over one at a time. A failed mirror is tried again at the first contact
+    after 30 minutes, even if the address hasn't changed.
 
 ## NTP agent
 
@@ -121,6 +125,19 @@ Devices that can speak DynDNS can use the Worker directly: provider "DynDNS" or
 "custom", server `<your host>`, username and password from the panel, hostname
 `<name>.<zone>`. Generic URL:
 `https://<name>:<password>@<your host>/nic/update?hostname=<name>.<zone>&myip=<ip>`.
+
+## Security
+
+A time request carries no password, so **anyone who can reach a device's NTP
+port can move its name to their own address**, just by asking for the time.
+The port number is not a secret. This is the price of supporting devices that
+can only ask for the time.
+
+- Use these names to find a device, not to trust it: don't put them in
+  firewall allow-lists or anything else that grants access by address.
+- Keep the devices' own logins strong, as you would on any public address.
+- Devices that can speak DynDNS should use the Worker's `/nic/update` directly:
+  that path has per-device credentials.
 
 ## Develop
 

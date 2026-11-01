@@ -84,7 +84,7 @@ func freePort(t *testing.T) int {
 
 func worker(api string) backend { return &workerBackend{API: api, Token: "test-token"} }
 
-func startAgent(t *testing.T, b backend, mutate ...func(*Agent)) {
+func startAgent(t *testing.T, b backend, mutate ...func(*Agent)) *Agent {
 	a := &Agent{
 		Backend:        b,
 		ListenIP:       "127.0.0.1",
@@ -105,6 +105,7 @@ func startAgent(t *testing.T, b backend, mutate ...func(*Agent)) {
 	done := make(chan struct{})
 	go func() { a.Run(ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
+	return a
 }
 
 func addr(port int) string { return fmt.Sprintf("127.0.0.1:%d", port) }
@@ -242,5 +243,37 @@ func TestRateLimitsFloods(t *testing.T) {
 	}
 	if answered > 4 {
 		t.Fatalf("%d answers to a flood, want at most 4", answered)
+	}
+}
+
+func TestKeepsMemoryBoundedUnderAFloodOfSources(t *testing.T) {
+	a := &Agent{RatePerSecond: 1, RateBurst: 1, MaxSources: 2, buckets: map[string]*bucket{}}
+	t0 := time.Now()
+	if !a.allow("192.0.2.1", t0) || !a.allow("192.0.2.2", t0) {
+		t.Fatal("first sources refused")
+	}
+	if a.allow("192.0.2.3", t0) {
+		t.Fatal("a third source got a slot while the table is full")
+	}
+	// Once the first two have nothing left to remember, their slots free up.
+	if !a.allow("192.0.2.3", t0.Add(2*time.Second)) {
+		t.Fatal("new source refused after the old ones went quiet")
+	}
+	if n := len(a.buckets); n > 2 {
+		t.Fatalf("%d sources remembered, want at most 2", n)
+	}
+}
+
+func TestLimitsTheTotalRateAcrossSources(t *testing.T) {
+	a := &Agent{RatePerSecond: 10, RateBurst: 10, GlobalRate: 2, GlobalBurst: 2, buckets: map[string]*bucket{}}
+	t0 := time.Now()
+	allowed := 0
+	for i := range 10 {
+		if a.allow(fmt.Sprintf("192.0.2.%d", i), t0) {
+			allowed++
+		}
+	}
+	if allowed != 2 {
+		t.Fatalf("%d of 10 sources answered, want 2", allowed)
 	}
 }

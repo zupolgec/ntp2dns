@@ -1,4 +1,4 @@
-import { deleteRecords, mirrorToDyn, upsertRecord } from "./dns";
+import { deleteRecords, MIRROR_RETRY_MS, mirrorTemporary, mirrorToDyn, upsertRecord } from "./dns";
 import type { Device, Env, Source } from "./env";
 
 export const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -34,8 +34,27 @@ export const getByPort = (env: Env, port: number) =>
 
 export type ReportResult = "good" | "nochg";
 
-// Records that a device was seen at `ip`. DNS and the old dyndns.org name are
-// touched only when the address actually changed.
+// The old dyndns.org name gets the address when it hasn't had it yet, or again
+// after a temporary failure once DynDNS's 30 minutes of quiet are over.
+function mirrorDue(device: Device, ip: string, now: number): boolean {
+  if (!device.legacy_hostname || ip.includes(":")) return false;
+  if (device.legacy_ip !== ip) return true;
+  return mirrorTemporary(device.legacy_result ?? "") && now - Date.parse(device.legacy_at ?? "") >= MIRROR_RETRY_MS;
+}
+
+async function mirror(env: Env, device: Device, ip: string, now: string): Promise<string | null> {
+  if (!mirrorDue(device, ip, Date.parse(now))) return null;
+  const result = await mirrorToDyn(env, device.legacy_hostname!, ip);
+  if (result === "skipped") return result; // no DynDNS account yet: send it once there is
+  await env.DB.prepare("update devices set legacy_ip = ?, legacy_result = ?, legacy_at = ? where id = ?")
+    .bind(ip, result, now, device.id)
+    .run();
+  Object.assign(device, { legacy_ip: ip, legacy_result: result, legacy_at: now });
+  return result;
+}
+
+// Records that a device was seen at `ip`. DNS is touched only when the address
+// actually changed; the old dyndns.org name follows its own state.
 export async function report(env: Env, device: Device, ip: string, source: Source): Promise<ReportResult> {
   const now = new Date().toISOString();
   const column = ip.includes(":") ? "ipv6" : "ipv4";
@@ -44,11 +63,12 @@ export async function report(env: Env, device: Device, ip: string, source: Sourc
     await env.DB.prepare("update devices set last_seen_at = ?, last_source = ? where id = ?")
       .bind(now, source, device.id)
       .run();
+    await mirror(env, device, ip, now);
     return "nochg";
   }
 
   await upsertRecord(env, fqdn(env, device), ip);
-  const mirror = device.legacy_hostname && column === "ipv4" ? await mirrorToDyn(env, device.legacy_hostname, ip) : null;
+  const mirrorResult = await mirror(env, device, ip, now);
 
   await env.DB.batch([
     env.DB.prepare(
@@ -58,7 +78,7 @@ export async function report(env: Env, device: Device, ip: string, source: Sourc
       device.id,
       ip,
       source,
-      mirror,
+      mirrorResult,
       now,
     ),
   ]);

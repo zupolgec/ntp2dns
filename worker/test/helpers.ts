@@ -8,6 +8,8 @@ export type FakeRecord = { id: string; type: string; name: string; content: stri
 export function fakeUpstreams() {
   const records: FakeRecord[] = [];
   const dynCalls: { url: URL; auth: string | null }[] = [];
+  // Answers members.dyndns.org gives, in order; then "good <ip>".
+  const dynAnswers: string[] = [];
   const cfCalls: { method: string; url: URL }[] = [];
   let nextId = 1;
 
@@ -49,13 +51,13 @@ export function fakeUpstreams() {
 
     if (url.hostname === "members.dyndns.org") {
       dynCalls.push({ url, auth: req.headers.get("authorization") });
-      return new Response(`good ${url.searchParams.get("myip")}`);
+      return new Response(dynAnswers.shift() ?? `good ${url.searchParams.get("myip")}`);
     }
 
     return realFetch(input as RequestInfo, init);
   });
 
-  return { records, dynCalls, cfCalls, restore: () => spy.mockRestore() };
+  return { records, dynCalls, dynAnswers, cfCalls, restore: () => spy.mockRestore() };
 }
 
 export const ADMIN = "http://localhost";
@@ -96,6 +98,21 @@ export async function createDevice(d: NewDevice): Promise<string> {
   }
   // NTP devices never send a password, so their page doesn't show one.
   return d.ntp ? "" : shownPassword(res.headers.get("location")!);
+}
+
+// Saves the device's edit form, like the user would.
+export async function editDevice(slug: string, d: Omit<NewDevice, "slug">) {
+  const form = new FormData();
+  form.set("label", d.label ?? slug);
+  if (d.ntp) form.set("ntp", "on");
+  form.set("legacy_hostname", d.legacy_hostname ?? "");
+  form.set("alert_hours", "24");
+  const res = await fetchWorker(`${ADMIN}/admin/devices/${await deviceId(slug)}`, {
+    method: "POST",
+    body: form,
+    headers: { origin: ADMIN },
+  });
+  if (res.status !== 303) throw new Error(`edit failed ${res.status}`);
 }
 
 export async function shownPassword(devicePath: string): Promise<string> {

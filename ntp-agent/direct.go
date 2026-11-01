@@ -21,6 +21,7 @@ type directBackend struct {
 	ports   []portEntry
 	devices map[int]directDevice
 	HTTP    *http.Client
+	Pause   time.Duration // wait after "try later" answers (911, dnserr, unknown)
 }
 
 type directDevice struct {
@@ -46,7 +47,7 @@ func loadDirect(path string) (*directBackend, error) {
 	if len(cfg.Devices) == 0 {
 		return nil, fmt.Errorf("%s: no devices", path)
 	}
-	b := &directBackend{devices: map[int]directDevice{}, HTTP: &http.Client{Timeout: 15 * time.Second}}
+	b := &directBackend{devices: map[int]directDevice{}, HTTP: &http.Client{Timeout: 15 * time.Second}, Pause: 30 * time.Minute}
 	for i, d := range cfg.Devices {
 		where := fmt.Sprintf("%s: device %d", path, i+1)
 		if d.Port < 1 || d.Port > 65535 {
@@ -130,15 +131,31 @@ func (b *directBackend) update(ctx context.Context, d directDevice, ip string) o
 	defer res.Body.Close()
 	line, _ := bufio.NewReader(io.LimitReader(res.Body, 512)).ReadString('\n')
 	line = strings.TrimSpace(line)
-	word := strings.ToLower(strings.Fields(line + " ")[0])
+	word := ""
+	if f := strings.Fields(line); len(f) > 0 {
+		word = strings.ToLower(f[0])
+	}
+	status := strings.TrimSpace(fmt.Sprintf("HTTP %d %s", res.StatusCode, line))
 
 	switch {
-	case res.StatusCode == 429 || res.StatusCode >= 500 || word == "911" || word == "dnserr":
-		return outcome{Result: fmt.Sprintf("HTTP %d %s", res.StatusCode, line), Retry: true}
+	case word == "911" || word == "dnserr":
+		return outcome{Result: status, Retry: true, RetryAfter: b.Pause}
+	case res.StatusCode == 429 || res.StatusCode >= 500:
+		return outcome{Result: status, Retry: true}
 	case res.StatusCode == 401 || res.StatusCode == 403:
 		return outcome{Result: "badauth", Rejected: true}
 	case res.StatusCode >= 400 || rejected[word]:
-		return outcome{Result: fmt.Sprintf("HTTP %d %s", res.StatusCode, line), Rejected: true}
+		return outcome{Result: status, Rejected: true}
+	case strings.Contains(d.URL, "{ip}") || word == "good" || word == "nochg":
+		return outcome{Result: line}
 	}
-	return outcome{Result: line}
+	// Not a dyndns2 answer (an error page, a captive portal...): try again later.
+	return outcome{Result: "unexpected answer: " + truncate(status, 80), Retry: true, RetryAfter: b.Pause}
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }

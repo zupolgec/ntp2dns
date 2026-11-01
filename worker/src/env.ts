@@ -31,6 +31,9 @@ export type Device = {
   password: string;
   ntp_port: number | null;
   legacy_hostname: string | null;
+  legacy_ip: string | null;
+  legacy_result: string | null;
+  legacy_at: string | null;
   alert_hours: number;
   enabled: number;
   ipv4: string | null;

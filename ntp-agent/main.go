@@ -62,6 +62,7 @@ func serveCmd(args []string) int {
 	refID := fs.String("refid", "LOCL", "reference id to announce (4 chars or upstream IPv4)")
 	rate := fs.Float64("rate", 2, "requests per second allowed per source IP")
 	burst := fs.Float64("burst", 10, "burst allowed per source IP")
+	globalRate := fs.Float64("global-rate", 200, "requests per second allowed from all sources together")
 	verbose := fs.Bool("v", false, "debug logging")
 	fs.Parse(args)
 
@@ -118,6 +119,9 @@ func serveCmd(args []string) int {
 		Clock:          systemClock,
 		RatePerSecond:  *rate,
 		RateBurst:      *burst,
+		GlobalRate:     *globalRate,
+		GlobalBurst:    2 * *globalRate,
+		MaxSources:     10000,
 		Log:            slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})),
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

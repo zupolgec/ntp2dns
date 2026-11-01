@@ -50,13 +50,22 @@ func writeConfig(t *testing.T, body string) string {
 	return path
 }
 
-func startDirect(t *testing.T, config string) {
+func startDirect(t *testing.T, config string, mutate ...func(*directBackend)) *Agent {
 	t.Helper()
 	b, err := loadDirect(writeConfig(t, config))
 	if err != nil {
 		t.Fatal(err)
 	}
-	startAgent(t, b, func(a *Agent) { a.Heartbeat = 0; a.CachePath = "" })
+	for _, m := range mutate {
+		m(b)
+	}
+	return startAgent(t, b, func(a *Agent) { a.Heartbeat = 0; a.CachePath = "" })
+}
+
+func pause(d time.Duration) func(*directBackend) { return func(b *directBackend) { b.Pause = d } }
+
+func oneDevice(p int, prov *fakeProvider) string {
+	return fmt.Sprintf(`{"devices":[{"port":%d,"url":"%s/nic/update","hostname":"a.example.net"}]}`, p, prov.srv.URL)
 }
 
 func TestUpdatesADyndns2ProviderDirectly(t *testing.T) {
@@ -100,23 +109,63 @@ func TestFillsTheAddressIntoAURLTemplate(t *testing.T) {
 	}
 }
 
-func TestRetriesWhenTheProviderIsDown(t *testing.T) {
+func TestWaitsBeforeRetryingWhenTheProviderAsksForIt(t *testing.T) {
 	p := freePort(t)
-	prov := newFakeProvider(t, "911", "dnserr", "good 127.0.0.1")
-	startDirect(t, fmt.Sprintf(`{"devices":[{"port":%d,"url":"%s/nic/update","hostname":"a.example.net"}]}`, p, prov.srv.URL))
+	prov := newFakeProvider(t, "911", "good 127.0.0.1")
+	startDirect(t, oneDevice(p, prov), pause(500*time.Millisecond))
 
 	waitAnswer(t, p)
-	eventually(t, "update after retries", func() bool { return len(prov.got()) == 3 })
-	time.Sleep(200 * time.Millisecond)
-	if n := len(prov.got()); n != 3 {
-		t.Fatalf("%d calls, want 3", n)
+	eventually(t, "first try", func() bool { return len(prov.got()) == 1 })
+	time.Sleep(300 * time.Millisecond)
+	if n := len(prov.got()); n != 1 {
+		t.Fatalf("%d calls during the pause, want 1", n)
+	}
+	eventually(t, "retry after the pause", func() bool { return len(prov.got()) == 2 })
+	time.Sleep(700 * time.Millisecond)
+	if n := len(prov.got()); n != 2 {
+		t.Fatalf("%d calls, want 2", n)
+	}
+}
+
+func TestSurvivesAnEmptyAnswer(t *testing.T) {
+	p := freePort(t)
+	prov := newFakeProvider(t, "", "good 127.0.0.1")
+	startDirect(t, oneDevice(p, prov), pause(100*time.Millisecond))
+
+	waitAnswer(t, p)
+	eventually(t, "retry after an empty answer", func() bool { return len(prov.got()) == 2 })
+	waitAnswer(t, p) // still running
+}
+
+func TestDoesNotTakeAnUnknownAnswerForSuccess(t *testing.T) {
+	p := freePort(t)
+	prov := newFakeProvider(t, "<html><body>Maintenance</body></html>", "good 127.0.0.1")
+	startDirect(t, oneDevice(p, prov), pause(100*time.Millisecond))
+
+	waitAnswer(t, p)
+	eventually(t, "retry after an unknown answer", func() bool { return len(prov.got()) == 2 })
+}
+
+func TestDoesNotPublishAnAddressTheDeviceHasLeft(t *testing.T) {
+	p := freePort(t)
+	prov := newFakeProvider(t, "good 127.0.0.1", "911")
+	a := startDirect(t, oneDevice(p, prov), pause(300*time.Millisecond))
+
+	waitAnswer(t, p)
+	eventually(t, "first update", func() bool { return len(prov.got()) == 1 })
+	a.seen(p, "198.51.100.9") // the device moves...
+	eventually(t, "failed update", func() bool { return len(prov.got()) == 2 })
+	waitAnswer(t, p) // ...and comes back before the retry
+	time.Sleep(600 * time.Millisecond)
+	for _, r := range prov.got()[2:] {
+		t.Errorf("sent %s after the device came back", r.URL.Query().Get("myip"))
 	}
 }
 
 func TestStopsWhenTheProviderRejectsTheUpdate(t *testing.T) {
 	p := freePort(t)
 	prov := newFakeProvider(t, "badauth")
-	startDirect(t, fmt.Sprintf(`{"devices":[{"port":%d,"url":"%s/nic/update","hostname":"a.example.net"}]}`, p, prov.srv.URL))
+	a := startDirect(t, fmt.Sprintf(`{"devices":[{"port":%d,"url":"%s/nic/update","hostname":"a.example.net"}]}`, p, prov.srv.URL))
 
 	waitAnswer(t, p)
 	eventually(t, "update", func() bool { return len(prov.got()) == 1 })
@@ -124,6 +173,13 @@ func TestStopsWhenTheProviderRejectsTheUpdate(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if n := len(prov.got()); n != 1 {
 		t.Fatalf("%d calls, want 1: a rejected update must not be retried", n)
+	}
+
+	// Not even for a new address: only fixing the configuration helps.
+	a.seen(p, "198.51.100.9")
+	time.Sleep(300 * time.Millisecond)
+	if n := len(prov.got()); n != 1 {
+		t.Fatalf("%d calls, want 1: a refused device must stay quiet until restart", n)
 	}
 }
 

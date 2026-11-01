@@ -33,6 +33,13 @@ export async function deleteRecords(env: Env, name: string) {
   }
 }
 
+// DynDNS answers that mean "try again later": 911 and dnserr ask for 30
+// minutes of quiet. Anything else is final for that address.
+export const MIRROR_RETRY_MS = 30 * 60_000;
+export function mirrorTemporary(result: string): boolean {
+  return /^(911|dnserr|network:|HTTP (429|5\d\d))/.test(result) || result === "";
+}
+
 // Keeps the old dyndns.org name in step during the migration.
 export async function mirrorToDyn(env: Env, hostname: string, ip: string): Promise<string> {
   if (!env.DYN_USERNAME || !env.DYN_UPDATER_KEY) return "skipped";
@@ -44,7 +51,8 @@ export async function mirrorToDyn(env: Env, hostname: string, ip: string): Promi
         "user-agent": "ntp2dns/1.0",
       },
     });
-    return (await res.text()).trim().slice(0, 100);
+    const body = (await res.text()).trim();
+    return (res.ok ? body : `HTTP ${res.status} ${body}`).slice(0, 100);
   } catch (e) {
     return `network: ${(e as Error).message}`.slice(0, 100);
   }

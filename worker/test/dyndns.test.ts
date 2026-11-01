@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { basic, createDevice, fakeUpstreams, fetchWorker } from "./helpers";
+import { env } from "cloudflare:workers";
+import { basic, createDevice, deviceId, editDevice, fakeUpstreams, fetchWorker } from "./helpers";
 
 let up: ReturnType<typeof fakeUpstreams>;
 beforeEach(() => {
@@ -105,6 +106,55 @@ describe("dyndns2 update endpoint", () => {
     expect(up.dynCalls[0].url.searchParams.get("hostname")).toBe("mirror.dyndns.org");
     expect(up.dynCalls[0].url.searchParams.get("myip")).toBe("203.0.113.30");
     expect(up.dynCalls[0].auth).toBe(basic("dynuser", "dynkey"));
+  });
+
+  describe("old dyndns.org name", () => {
+    const update = (slug: string, pass: string, ip: string) =>
+      fetchWorker(`${HOST}/nic/update?hostname=${slug}.dyn.example.test&myip=${ip}`, {
+        headers: { authorization: basic(slug, pass) },
+      });
+    // Moves the last attempt on the old name back in time.
+    const later = async (slug: string, minutes: number) =>
+      env.DB.prepare("update devices set legacy_at = ? where id = ?")
+        .bind(new Date(Date.now() - minutes * 60_000).toISOString(), await deviceId(slug))
+        .run();
+
+    it("is updated again after a temporary failure, even if the address stays the same", async () => {
+      const pass = await createDevice({ slug: "mirror-911", legacy_hostname: "m911.dyndns.org" });
+      up.dynAnswers.push("911");
+      await update("mirror-911", pass, "203.0.113.32");
+      await update("mirror-911", pass, "203.0.113.32");
+      expect(up.dynCalls).toHaveLength(1); // DynDNS asks for 30 minutes of quiet after 911
+
+      await later("mirror-911", 31);
+      expect(await (await update("mirror-911", pass, "203.0.113.32")).text()).toBe("nochg 203.0.113.32");
+      expect(up.dynCalls).toHaveLength(2);
+
+      await later("mirror-911", 31);
+      await update("mirror-911", pass, "203.0.113.32");
+      expect(up.dynCalls).toHaveLength(2);
+    });
+
+    it("is not tried again after a refusal until the address changes", async () => {
+      const pass = await createDevice({ slug: "mirror-auth", legacy_hostname: "mauth.dyndns.org" });
+      up.dynAnswers.push("badauth");
+      await update("mirror-auth", pass, "203.0.113.33");
+      await later("mirror-auth", 31);
+      await update("mirror-auth", pass, "203.0.113.33");
+      expect(up.dynCalls).toHaveLength(1);
+    });
+
+    it("is updated when added to a device that already has an address", async () => {
+      const pass = await createDevice({ slug: "mirror-late" });
+      await update("mirror-late", pass, "203.0.113.34");
+      expect(up.dynCalls).toHaveLength(0);
+
+      await editDevice("mirror-late", { legacy_hostname: "late.dyndns.org" });
+      await update("mirror-late", pass, "203.0.113.34");
+      expect(up.dynCalls.map((c) => c.url.searchParams.get("hostname"))).toEqual(["late.dyndns.org"]);
+      await update("mirror-late", pass, "203.0.113.34");
+      expect(up.dynCalls).toHaveLength(1);
+    });
   });
 
   it("also accepts the old dyndns.org name as hostname, for devices that cannot change it", async () => {
