@@ -117,26 +117,15 @@ describe("dyndns2 update endpoint", () => {
 });
 
 describe("old /?host= link", () => {
-  it("works only for devices that have it enabled", async () => {
-    await createDevice({ slug: "old-on", legacy_hostname: "on.dyndns.org", legacy_http: true });
-    await createDevice({ slug: "old-off", legacy_hostname: "off.dyndns.org" });
+  it("is gone: the root only leads to the panel and never touches DNS", async () => {
+    await createDevice({ slug: "old-on", legacy_hostname: "on.dyndns.org" });
 
-    const on = await fetchWorker(`http://ddns.example.test/?host=on.dyndns.org`, {
+    const res = await fetchWorker(`http://ddns.example.test/?host=on.dyndns.org`, {
       headers: { "cf-connecting-ip": "203.0.113.40" },
+      redirect: "manual",
     });
-    expect(await on.text()).toBe("good 203.0.113.40");
-    expect(up.records).toMatchObject([{ name: "old-on.dyn.example.test", content: "203.0.113.40" }]);
-
-    const off = await fetchWorker(`http://ddns.example.test/?host=off.dyndns.org`, {
-      headers: { "cf-connecting-ip": "203.0.113.41" },
-    });
-    expect(await off.text()).toBe("nohost");
-  });
-
-  it("does not run anything from the host parameter", async () => {
-    const res = await fetchWorker(`http://ddns.example.test/?host=${encodeURIComponent('x"; id; echo "')}`, {
-      headers: { "cf-connecting-ip": "203.0.113.42" },
-    });
-    expect(await res.text()).toBe("nohost");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/admin");
+    expect(up.records).toEqual([]);
   });
 });

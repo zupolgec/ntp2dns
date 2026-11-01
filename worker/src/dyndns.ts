@@ -1,6 +1,6 @@
 import type { Context } from "hono";
 import { safeEqual } from "./crypto";
-import { fqdn, getByLegacyHttp, getBySlug, parseIp, report } from "./devices";
+import { fqdn, getBySlug, parseIp, report } from "./devices";
 import type { Env } from "./env";
 
 type C = Context<{ Bindings: Env }>;
@@ -51,16 +51,4 @@ export async function nicUpdate(c: C) {
   const line = `${changed ? "good" : "nochg"} ${ips.join(",")}`;
   // One answer line per hostname, as dyndns2 clients expect.
   return text(c, hostnames.map(() => line).join("\n"));
-}
-
-// Plain GET /?host=<old name> link, for devices that can only call a fixed URL
-// (this is how the original setup worked). No credentials, so it only works for devices
-// flagged for it in the panel.
-export async function legacyHttp(c: C) {
-  const host = c.req.query("host");
-  if (!host) return c.notFound();
-  const device = await getByLegacyHttp(c.env, host);
-  const ip = callerIp(c);
-  if (!device || !ip) return text(c, "nohost");
-  return text(c, `${await report(c.env, device, ip, "http")} ${ip}`);
 }

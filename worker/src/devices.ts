@@ -32,11 +32,6 @@ export const getById = (env: Env, id: number) =>
 export const getByPort = (env: Env, port: number) =>
   env.DB.prepare("select * from devices where ntp_port = ? and enabled = 1").bind(port).first<Device>();
 
-export const getByLegacyHttp = (env: Env, hostname: string) =>
-  env.DB.prepare("select * from devices where legacy_hostname = ? and legacy_http = 1 and enabled = 1")
-    .bind(hostname.toLowerCase())
-    .first<Device>();
-
 export type ReportResult = "good" | "nochg";
 
 // Records that a device was seen at `ip`. DNS and the old dyndns.org name are

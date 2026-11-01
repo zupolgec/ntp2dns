@@ -46,7 +46,7 @@ input[type=text],input[type=number],textarea{width:100%;max-width:420px;padding:
 .error{border-color:#c4320a;color:#c4320a}
 .secret{user-select:all}[data-hidden] .secret,.mask{display:none}[data-hidden] .mask{display:inline}
 .link{border:0;background:none;color:var(--accent);font:inherit;cursor:pointer;padding:0;margin-left:10px}
-dl{display:grid;grid-template-columns:200px 1fr;gap:6px 16px;margin:0}dt{color:var(--muted)}dd{margin:0}
+dl{display:grid;grid-template-columns:200px 1fr;gap:6px 16px;margin:0;align-items:baseline}dt{color:var(--muted)}dd{margin:0}
 `;
 
 function Layout(props: { title: string; user: string; t: Messages; children: Child }) {
@@ -106,7 +106,7 @@ function mirrorLabel(t: Messages, raw: string | null): string {
 }
 
 function sourceLabel(t: Messages, source: string) {
-  return source === "ntp" ? t.sourceNtp : source === "http" ? t.sourceHttp : t.sourceDyndns;
+  return source === "ntp" ? t.sourceNtp : t.sourceDyndns;
 }
 
 panel.get("/", async (c) => {
@@ -178,7 +178,6 @@ type FormValues = {
   notes: string;
   ntp: boolean;
   legacy_hostname: string;
-  legacy_http: boolean;
   alert_hours: string;
 };
 
@@ -195,7 +194,6 @@ async function nextFreePort(env: Env): Promise<number | null> {
 function DeviceForm(props: {
   t: Messages;
   env: Env;
-  host: string;
   action: string;
   values: FormValues;
   error?: string;
@@ -226,9 +224,6 @@ function DeviceForm(props: {
         {t.fieldLegacyHostname} <span class="muted">{t.fieldLegacyHostnameHint}</span>
       </label>
       <input type="text" id="legacy_hostname" name="legacy_hostname" value={v.legacy_hostname} placeholder="example.dyndns.org" />
-      <label class="check">
-        <input type="checkbox" name="legacy_http" checked={v.legacy_http} /> {t.fieldLegacyHttp(props.host)}
-      </label>
       <label for="alert_hours">{t.fieldAlertHours}</label>
       <input type="number" id="alert_hours" name="alert_hours" value={v.alert_hours} min={1} required />
       <p>
@@ -249,7 +244,6 @@ async function readForm(c: { req: { formData(): Promise<FormData> } }): Promise<
     notes: s("notes"),
     ntp: f.get("ntp") === "on",
     legacy_hostname: s("legacy_hostname").toLowerCase(),
-    legacy_http: f.get("legacy_http") === "on",
     alert_hours: s("alert_hours") || "24",
   };
 }
@@ -268,7 +262,6 @@ async function validate(env: Env, t: Messages, host: string, v: FormValues, self
       .first<{ label: string }>();
     if (taken) return t.errLegacyTaken(taken.label);
   }
-  if (v.legacy_http && !v.legacy_hostname) return t.errLegacyHttpNeedsHostname;
   const h = Number(v.alert_hours);
   if (!Number.isInteger(h) || h < 1) return t.errAlertHours;
   return null;
@@ -280,7 +273,6 @@ const empty: FormValues = {
   notes: "",
   ntp: false,
   legacy_hostname: "",
-  legacy_http: false,
   alert_hours: "24",
 };
 
@@ -378,7 +370,6 @@ panel.post("/devices", async (c) => {
         <DeviceForm
           t={t}
           env={c.env}
-          host={host}
           action="/admin/devices"
           values={v}
           error={error ?? undefined}
@@ -389,8 +380,8 @@ panel.post("/devices", async (c) => {
     );
 
   const d = (await c.env.DB.prepare(
-    `insert into devices (slug, label, notes, password, ntp_port, legacy_hostname, legacy_http, alert_hours)
-     values (?, ?, ?, ?, ?, ?, ?, ?) returning id`,
+    `insert into devices (slug, label, notes, password, ntp_port, legacy_hostname, alert_hours)
+     values (?, ?, ?, ?, ?, ?, ?) returning id`,
   )
     .bind(
       v.slug,
@@ -399,7 +390,6 @@ panel.post("/devices", async (c) => {
       newSecret(),
       port,
       v.legacy_hostname || null,
-      v.legacy_http ? 1 : 0,
       Number(v.alert_hours),
     )
     .first<{ id: number }>())!;
@@ -458,7 +448,6 @@ panel.get("/devices/:id{[0-9]+}", async (c) => {
       <DeviceForm
         t={t}
         env={c.env}
-        host={host}
         action={`/admin/devices/${d.id}`}
         isNew={false}
         values={{
@@ -467,7 +456,6 @@ panel.get("/devices/:id{[0-9]+}", async (c) => {
           notes: d.notes,
           ntp: d.ntp_port !== null,
           legacy_hostname: d.legacy_hostname ?? "",
-          legacy_http: d.legacy_http === 1,
           alert_hours: String(d.alert_hours),
         }}
       />
@@ -517,7 +505,6 @@ panel.post("/devices/:id{[0-9]+}", async (c) => {
         <DeviceForm
           t={t}
           env={c.env}
-          host={host}
           action={`/admin/devices/${d.id}`}
           values={v}
           error={error ?? undefined}
@@ -527,14 +514,13 @@ panel.post("/devices/:id{[0-9]+}", async (c) => {
       422,
     );
   await c.env.DB.prepare(
-    "update devices set label = ?, notes = ?, ntp_port = ?, legacy_hostname = ?, legacy_http = ?, alert_hours = ? where id = ?",
+    "update devices set label = ?, notes = ?, ntp_port = ?, legacy_hostname = ?, alert_hours = ? where id = ?",
   )
     .bind(
       v.label,
       v.notes,
       port,
       v.legacy_hostname || null,
-      v.legacy_http ? 1 : 0,
       Number(v.alert_hours),
       d.id,
     )

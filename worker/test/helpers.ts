@@ -73,7 +73,6 @@ export type NewDevice = {
   label?: string;
   ntp?: boolean;
   legacy_hostname?: string;
-  legacy_http?: boolean;
 };
 
 // Creates a device through the panel, like the user would, and returns the
@@ -84,7 +83,6 @@ export async function createDevice(d: NewDevice): Promise<string> {
   form.set("label", d.label ?? d.slug);
   if (d.ntp) form.set("ntp", "on");
   form.set("legacy_hostname", d.legacy_hostname ?? "");
-  if (d.legacy_http) form.set("legacy_http", "on");
   form.set("alert_hours", "24");
   const res = await fetchWorker(`${ADMIN}/admin/devices`, {
     method: "POST",

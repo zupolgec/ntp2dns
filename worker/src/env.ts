@@ -31,7 +31,6 @@ export type Device = {
   password: string;
   ntp_port: number | null;
   legacy_hostname: string | null;
-  legacy_http: number;
   alert_hours: number;
   enabled: number;
   ipv4: string | null;
@@ -42,4 +41,4 @@ export type Device = {
   created_at: string;
 };
 
-export type Source = "dyndns" | "ntp" | "http";
+export type Source = "dyndns" | "ntp";
